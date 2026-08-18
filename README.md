@@ -99,7 +99,7 @@ CSVによるバックアップに加え、Android向け戦績管理アプリ「�
 
 データモデルではキャラクター名やマップ名そのものを戦績ごとに重複保存するのではなくIDで参照し、マスターデータと分離しています。これにより、表記変更をマスター側で吸収しやすくし、戦績データのサイズ増加も抑えています。
 
-### 2. SwiftDataの集計方法を複数方式で設計・検証
+### 2. SwiftDataの集計方法を複数方式で設計・検証し、実機で再検証
 
 プロフィールでは、キャラクターごとの試合数・勝利数をSwiftDataから集計します。
 
@@ -126,6 +126,10 @@ TaskGroup
 `BongaRecordTests/SingleFetchAggregatorTests.swift` では、1,000件・50,000件・500,000件・2,000,000件のデータを使う比較テストに加え、ディスク上のストアを使った条件も用意しています。
 
 速度だけを主張するのではなく、SQL側でCOUNTを行う方式と、モデルオブジェクトを大量に実体化する方式のトレードオフを実測できるようにしています。
+
+XCTestベースの計測はすべてシミュレータ上で行っていましたが、シミュレータのCPUコア数(`ProcessInfo.processInfo.activeProcessorCount`)はホストMacの値であり、実機とは異なります。そこで`#if DEBUG`で隔離した開発者専用のベンチマーク画面(`DeveloperTools/`)をアプリ内に用意し、実機・実データ(CloudKit連携込みの本番相当ストア)で直接計測できるようにしました。
+
+iPhone 15実機・38,663件のデータでの計測では、直列方式(avg 144.4ms)に対しModelActorプール方式(avg 66.0ms)が約2.2倍高速という結果が得られ、シミュレータの実ディスク環境で確認していた約2.4倍という倍率とほぼ同じ水準で再現されました。このベンチマーク画面は`#if DEBUG`で囲んでいるため、App Store配布用のビルドには含まれません。
 
 ### 3. OBS連携を「利用者が導入できる形」まで改善
 
@@ -187,12 +191,15 @@ SwiftUIによる画面実装だけでなく、ActivityKit / WidgetKit、UserNoti
 - 2,000,000件のストレステスト
 - pool sizeを1 / 2 / 4 / 8 / 16へ変えた際の傾向確認
 - ディスクバックストアを利用した条件での比較
+- actor生成コストの寄与、実測並行度、CPU時間/経過時間比率など、並列化が効かなかった要因の切り分け
+- **実機(iPhone 15)・実データ(38,663件)での再計測**: ModelActorプール方式が直列方式の約2.2倍高速であることを確認。シミュレータでの検証結果(約2.4倍)とほぼ整合
 
 関連コード:
 
 - `BongaRecordTests/ProficiencyPerformanceTests.swift`
 - `BongaRecordTests/SingleFetchAggregatorTests.swift`
 - `BongaRecordTests/ParallelismDiagnosticsTests.swift`
+- `DeveloperTools/DeveloperBenchmarkView.swift`(実機上での対話的な計測用、`#if DEBUG`限定)
 
 ## プロジェクト構成
 
@@ -203,7 +210,7 @@ BongaRecord/
 │   └── Components/   # 再利用UI
 ├── Storage/          # 集計・CSV・通知・Live Activity・OBS連携
 ├── Theme/            # 配色・背景などの外観管理
-├── DeveloperTools/   # ベンチマーク・検証用機能
+├── DeveloperTools/   # ベンチマーク・検証用機能（#if DEBUG限定）
 └── BongaRecordApp.swift
 
 BongaRecordTests/
@@ -253,8 +260,9 @@ CloudKitやLive Activitiesなど、Apple Developerアカウントに紐づく設
 
 ## 今後改善したいこと
 
-- 実データでのパフォーマンス計測結果をREADMEへ継続的に反映する
-- 集計処理のボトルネックをInstrumentsで計測し、データ件数に応じた最適な方式を検討する
+- 「CPU時間が増加する」現象が、SwiftData/SQLite固有のロック競合によるものか、Swift Concurrencyのタスク分割自体の一般的なオーバーヘッドかを切り分ける対照実験
+- `PlayerInfo`側に集計専用の非正規化フィールドを持たせ、書き込み時にインクリメントする方式(読み取り時のクエリ自体を発生させない設計)の検証
+- 集計処理のボトルネックをInstrumentsで計測し、データ件数に応じた最適な方式を継続的に見直す
 - UIテスト・アクセシビリティ対応を拡充する
 - 利用者からのフィードバックをもとに入力・分析体験を改善する
 
