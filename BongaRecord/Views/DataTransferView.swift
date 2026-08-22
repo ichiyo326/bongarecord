@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 struct DataTransferView: View {
     @Environment(\.modelContext) private var context
     @Query private var playerInfos: [PlayerInfo]
+    // バックアップCSVでカスタムマップ/キャラの名前を正しく解決するために必要。
+    @Query private var mapPrefs: [MapPreference]
+    @Query private var charPrefs: [CharacterPreference]
     // 太さ/色などテーマの変更をこの画面が生きている間もライブ反映するために保持。
     @ObservedObject private var theme = ThemeManager.shared
 
@@ -20,6 +23,8 @@ struct DataTransferView: View {
 
     @State private var exportDocument: CSVDocument?
     @State private var isProcessing      = false
+    @State private var importProgress    = 0
+    @State private var importTotal       = 0
 
     var body: some View {
         ZStack {
@@ -78,8 +83,17 @@ struct DataTransferView: View {
                     .padding(.horizontal).padding(.top, 8)
 
                     if isProcessing {
-                        ProgressView("処理中...")
-                            .padding(.horizontal).padding(.top, 8)
+                        if importTotal > 0 {
+                            ProgressView(value: Double(importProgress), total: Double(importTotal))
+                                .padding(.horizontal).padding(.top, 8)
+                            Text("\(importProgress) / \(importTotal) 件")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal)
+                        } else {
+                            ProgressView("処理中...")
+                                .padding(.horizontal).padding(.top, 8)
+                        }
                     }
 
                     Spacer().frame(height: 200)
@@ -144,7 +158,10 @@ struct DataTransferView: View {
                 )
                 let records = try context.fetch(descriptor)
                 let pi = playerInfos.first
-                let csv = CSVManager.makeCSV(records: records, playerInfo: pi)
+                let csv = CSVManager.makeCSV(records: records,
+                                             playerInfo: pi,
+                                             mapPrefs: mapPrefs,
+                                             charPrefs: charPrefs)
                 exportDocument = CSVDocument(text: csv)
                 showExporter = true
             } catch {
@@ -155,10 +172,12 @@ struct DataTransferView: View {
         }
     }
 
-    // MARK: - Import（バッチ削除＋バッチinsert）
+    // MARK: - Import（バックグラウンドactorでバッチ削除＋バッチinsert）
 
     private func runImport(url: URL) async {
         isProcessing = true
+        importProgress = 0
+        importTotal = 0
         defer { isProcessing = false }
 
         let accessing = url.startAccessingSecurityScopedResource()
@@ -167,32 +186,39 @@ struct DataTransferView: View {
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
             let parsed = try CSVManager.parseCSV(text)
-
-            // 既存戦績を全削除（取り込みは置換方式）
-            try context.delete(model: BattleRecord.self)
+            importTotal = parsed.records.count
 
             // ランク機能ON時は、取り込んだ全件に現在のランクをスタンプ
             let pi = playerInfos.first
             let stampRaw: Int = (pi?.rankTrackingEnabled == true) ? pi!.currentRankRaw : -1
 
-            // 取り込んだ戦績を挿入（重複行もすべて1試合として登録）
-            for record in parsed.records {
-                record.rankRaw = stampRaw
-                context.insert(record)
+            // 実際の削除・挿入・保存はMainActorから切り離したactorで行う。
+            // ここでは進捗（処理済み件数）を受け取ってUIに反映するだけ。
+            let importer = CSVImportActor(modelContainer: context.container)
+            for try await done in importer.importAll(parsed.records, rankStampRaw: stampRaw) {
+                importProgress = done
             }
 
-            try context.save()
+            // 別actor（別ModelContext）で行った変更をこの画面のcontextへ
+            // 反映させる。SwiftDataは変更を自動で追跡し直すが、@Queryの
+            // 表示元となるcontextを明示的に最新化しておくと確実。
+            try? context.save()
+
+            // 勝敗コードの解釈（painyaunta 0=負け/1=勝ち という前提）が正しいか、
+            // 取り込み直後に内訳を見て目視確認できるようにする。
+            let wins   = parsed.records.filter { $0.result == .win }.count
+            let losses = parsed.records.filter { $0.result == .lose }.count
+            let draws  = parsed.records.filter { $0.result == .draw }.count
 
             alertTitle = "取り込み完了"
+            var message = "戦績 \(parsed.records.count) 件を取り込みました\n"
+                + "（勝ち\(wins) / 負け\(losses) / 引分け\(draws)）"
             if parsed.skipped > 0 {
-                alertMessage = "戦績 \(parsed.records.count) 件を取り込みました\n"
-                    + "（未対応のキャラ／マップ等で \(parsed.skipped) 行をスキップ）"
-            } else {
-                alertMessage = "戦績 \(parsed.records.count) 件を取り込みました"
+                message += "\n（未対応のキャラ／マップ等で \(parsed.skipped) 行をスキップ）"
             }
+            alertMessage = message
             showAlert = true
         } catch {
-            context.rollback()
             alertTitle = "取り込み失敗"
             alertMessage = error.localizedDescription
             showAlert = true

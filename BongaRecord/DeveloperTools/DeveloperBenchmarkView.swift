@@ -27,6 +27,11 @@ struct DeveloperBenchmarkView: View {
     @State private var resultLines: [String] = []
     @State private var iterations = 5
 
+    @State private var isRunningWrite = false
+    @State private var writeResultLines: [String] = []
+    @State private var writeIterations = 3
+    @State private var writeRecordCount = 2000
+
     private var deviceCoreCount: Int {
         ProcessInfo.processInfo.activeProcessorCount
     }
@@ -48,6 +53,10 @@ struct DeveloperBenchmarkView: View {
                     controlCard
                     if !resultLines.isEmpty {
                         resultCard
+                    }
+                    writeControlCard
+                    if !writeResultLines.isEmpty {
+                        writeResultCard
                     }
                 }
                 .padding()
@@ -126,7 +135,7 @@ struct DeveloperBenchmarkView: View {
         .cornerRadius(8)
     }
 
-    // MARK: - 実行
+    // MARK: - 実行（読み取り専用：実データを使う）
 
     private func runBenchmark() {
         isRunning = true
@@ -135,10 +144,11 @@ struct DeveloperBenchmarkView: View {
         let charIds = Array(Set(allRecords.map(\.characterId))).sorted()
         let container = context.container
         let n = iterations
+        let records = allRecords
 
         Task {
             var lines: [String] = []
-            lines.append("対象キャラ数: \(charIds.count) / 総戦績: \(allRecords.count)件")
+            lines.append("対象キャラ数: \(charIds.count) / 総戦績: \(records.count)件")
 
             // Legacy(直列)。既存のcontextをそのまま使い回す。
             let legacyContext = ModelContext(container)
@@ -148,7 +158,7 @@ struct DeveloperBenchmarkView: View {
                 _ = try? DeveloperLegacyCalculator.computeAll(context: legacyContext, charIds: charIds)
                 legacySamples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
             }
-            lines.append(format("Legacy(直列)", legacySamples))
+            lines.append(format("練度集計 Legacy(直列)", legacySamples))
 
             // Pool(size=4、使い回し)
             var poolSamples: [Double] = []
@@ -158,7 +168,24 @@ struct DeveloperBenchmarkView: View {
                 _ = try? await runPooled(charIds: charIds, calculators: calculators)
                 poolSamples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
             }
-            lines.append(format("Pool(size=4)", poolSamples))
+            lines.append(format("練度集計 Pool(size=4)", poolSamples))
+
+            // Snapshot集計: 旧5パス vs 新1パス（試合登録のたびに毎回呼ばれる処理）
+            var legacySnapshotSamples: [Double] = []
+            for _ in 0..<n {
+                let start = CFAbsoluteTimeGetCurrent()
+                _ = DeveloperLegacyCalculator.legacySnapshotCompute(from: records, since: 0)
+                legacySnapshotSamples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            }
+            lines.append(format("Snapshot集計 旧(5パス)", legacySnapshotSamples))
+
+            var newSnapshotSamples: [Double] = []
+            for _ in 0..<n {
+                let start = CFAbsoluteTimeGetCurrent()
+                _ = BattleStatsSnapshot.compute(from: records, since: 0)
+                newSnapshotSamples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            }
+            lines.append(format("Snapshot集計 新(1パス)", newSnapshotSamples))
 
             await MainActor.run {
                 resultLines = lines
@@ -189,6 +216,165 @@ struct DeveloperBenchmarkView: View {
                 merged.append(contentsOf: partial)
             }
             return merged
+        }
+    }
+
+    // MARK: - 書き込み系ベンチマーク（ダミーデータのみ使用。実データには一切触れない）
+
+    /// CSV取込・ランクスタンプは「書き込み」を伴うため、実データを使う訳にはいかない。
+    /// ここだけ専用のin-memory `ModelContainer`を毎回新規に作り、ダミーレコードで
+    /// 計測する。コンテナ生成・ダミー投入のコストは計測区間の外に置き、
+    /// 「実際に削除・挿入・保存（またはfetch・更新・保存）にかかった時間」だけを測る。
+    private var writeControlCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("書き込み系ベンチマーク（ダミーデータ・実データ非破壊）")
+                .font(.headline)
+            Stepper("件数: \(writeRecordCount)", value: $writeRecordCount, in: 500...20000, step: 500)
+            Stepper("試行回数: \(writeIterations)", value: $writeIterations, in: 1...10)
+
+            Button {
+                runWriteBenchmark()
+            } label: {
+                HStack {
+                    if isRunningWrite {
+                        ProgressView()
+                    }
+                    Text(isRunningWrite ? "実行中…" : "書き込みベンチマーク実行")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(Color.bongaPurple)
+                .foregroundColor(.bongaOnAccent)
+                .cornerRadius(6)
+            }
+            .disabled(isRunningWrite)
+
+            Text("ここはダミーのin-memoryコンテナ上でのみ計測するため、実際の戦績データには一切触れません。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding()
+        .background(Color.bongaPurple.opacity(0.1))
+        .cornerRadius(8)
+    }
+
+    private var writeResultCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("書き込み系 結果")
+                .font(.headline)
+            ForEach(writeResultLines, id: \.self) { line in
+                Text(line)
+                    .font(.system(.footnote, design: .monospaced))
+            }
+        }
+        .padding()
+        .background(Color.bongaPurple.opacity(0.1))
+        .cornerRadius(8)
+    }
+
+    private func makeDummySchema() -> Schema {
+        Schema([BattleRecord.self, PlayerInfo.self, MapPreference.self, CharacterPreference.self])
+    }
+
+    private func makeInMemoryContainer() throws -> ModelContainer {
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        return try ModelContainer(for: makeDummySchema(), configurations: config)
+    }
+
+    private func makeDummyDrafts(count: Int) -> [CSVManager.ImportedBattleDraft] {
+        let mapIds = MasterData.maps.map(\.id)
+        let charIds = MasterData.characters.map(\.id)
+        let results: [BattleResult] = [.win, .lose, .draw]
+        var drafts: [CSVManager.ImportedBattleDraft] = []
+        drafts.reserveCapacity(count)
+        for i in 0..<count {
+            drafts.append(CSVManager.ImportedBattleDraft(
+                date: Date(timeIntervalSince1970: TimeInterval(i)),
+                mapId: mapIds[i % mapIds.count],
+                characterId: charIds[i % charIds.count],
+                result: results[i % results.count]
+            ))
+        }
+        return drafts
+    }
+
+    private func runWriteBenchmark() {
+        isRunningWrite = true
+        writeResultLines = []
+        let n = writeIterations
+        let count = writeRecordCount
+        let drafts = makeDummyDrafts(count: count)
+
+        Task {
+            var lines: [String] = []
+            lines.append("ダミー件数: \(count)件 / 試行回数: \(n)回")
+
+            // --- CSV取込: 旧(MainActor同期) vs 新(CSVImportActor) ---
+            var legacyImportSamples: [Double] = []
+            for _ in 0..<n {
+                guard let container = try? makeInMemoryContainer() else { continue }
+                let ctx = ModelContext(container)
+                let start = CFAbsoluteTimeGetCurrent()
+                try? DeveloperLegacyCalculator.legacyImport(drafts, rankStampRaw: -1, context: ctx)
+                legacyImportSamples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            }
+            lines.append(format("CSV取込 旧(MainActor同期)", legacyImportSamples))
+
+            var actorImportSamples: [Double] = []
+            for _ in 0..<n {
+                guard let container = try? makeInMemoryContainer() else { continue }
+                let importer = CSVImportActor(modelContainer: container)
+                let start = CFAbsoluteTimeGetCurrent()
+                let stream = await importer.importAll(drafts, rankStampRaw: -1)
+                do {
+                    for try await _ in stream {}
+                } catch {
+                    // ベンチマーク用途のため、途中エラーでも計測自体は継続する
+                }
+                actorImportSamples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            }
+            lines.append(format("CSV取込 新(CSVImportActor)", actorImportSamples))
+
+            // --- ランクスタンプ: 旧(MainActor同期) vs 新(RankStampActor) ---
+            var legacyStampSamples: [Double] = []
+            for _ in 0..<n {
+                guard let container = try? makeInMemoryContainer() else { continue }
+                let ctx = ModelContext(container)
+                for draft in drafts {
+                    let r = BattleRecord(date: draft.date, mapId: draft.mapId,
+                                          characterId: draft.characterId, result: draft.result)
+                    ctx.insert(r)
+                }
+                try? ctx.save()
+
+                let start = CFAbsoluteTimeGetCurrent()
+                _ = try? DeveloperLegacyCalculator.legacyStampAll(rank: PlayerRank.superstarC.rawValue, context: ctx)
+                legacyStampSamples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            }
+            lines.append(format("ランクスタンプ 旧(MainActor同期)", legacyStampSamples))
+
+            var actorStampSamples: [Double] = []
+            for _ in 0..<n {
+                guard let container = try? makeInMemoryContainer() else { continue }
+                let ctx = ModelContext(container)
+                for draft in drafts {
+                    let r = BattleRecord(date: draft.date, mapId: draft.mapId,
+                                          characterId: draft.characterId, result: draft.result)
+                    ctx.insert(r)
+                }
+                try? ctx.save()
+
+                let stamper = RankStampActor(modelContainer: container)
+                let start = CFAbsoluteTimeGetCurrent()
+                _ = try? await stamper.stampAll(rank: PlayerRank.superstarC.rawValue)
+                actorStampSamples.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            }
+            lines.append(format("ランクスタンプ 新(RankStampActor)", actorStampSamples))
+
+            await MainActor.run {
+                writeResultLines = lines
+                isRunningWrite = false
+            }
         }
     }
 

@@ -65,13 +65,16 @@ final class AchievementNotifier: ObservableObject {
     func checkAndNotify(records: [BattleRecord]) {
         guard isEnabled, isAuthorized else { return }
 
-        let totalWins = records.filter { $0.result == .win }.count
+        // 通算勝利数はsince:0で集計した`snapshot.wins`と同じ値なので、
+        // 別途`records.filter { ... }.count`で全件を数え直さずsnapshotを使い回す。
+        let snapshot = BattleStatsSnapshot.compute(from: records, since: 0)
+
+        let totalWins = snapshot.wins
         if let milestone = Self.totalWinMilestones.last(where: { $0 <= totalWins && $0 > lastNotifiedTotalWins }) {
             notify(title: "実績達成🎉", body: "通算 \(milestone)勝 を達成しました！")
         }
         lastNotifiedTotalWins = totalWins
 
-        let snapshot = BattleStatsSnapshot.compute(from: records, since: 0)
         if snapshot.streakType == .win {
             if let milestone = Self.winStreakMilestones.last(where: { $0 <= snapshot.streakCount && $0 > lastNotifiedStreak }) {
                 notify(title: "連勝記録🔥", body: "\(milestone)連勝 達成中です！")

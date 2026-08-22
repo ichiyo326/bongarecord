@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import Photos
 
 struct BattleStatsView: View {
     // 太さ/色などテーマの変更をこの画面が生きている間もライブ反映するために保持。
@@ -38,6 +39,17 @@ struct BattleStatsView: View {
     @State private var showHelp = false
     // 戦績シェア画面への遷移
     @State private var showShare = false
+
+    // 戦績表スクリーンショット（現在の検索結果を画像化したもの）
+    @State private var snapshotImage: UIImage?
+    @State private var showSnapshotPreview = false
+    @State private var showSaveResult = false
+    @State private var saveResultMessage: String?
+
+    // Xシェア用
+    @State private var showXShareInfo = false
+    @State private var pendingXAppURL: URL?
+    @State private var pendingXWebURL: URL?
 
     // 結果の表示形式
     enum ViewMode: String, CaseIterable, Identifiable {
@@ -145,34 +157,7 @@ struct BattleStatsView: View {
                             SectionLabel(text: "対戦マップ（複数選択可）")
                                 .padding(.horizontal).padding(.top, 2)
                             FormCard {
-                                let maps = Catalog.resolvedMaps(prefs: mapPrefs)
-                                let groups = Catalog.resolvedMapGroups(maps)
-                                Menu {
-                                    Button {
-                                        filterMapIds.removeAll()
-                                    } label: {
-                                        Label("すべて解除", systemImage: filterMapIds.isEmpty ? "checkmark" : "")
-                                    }
-                                    ForEach(groups, id: \.self) { group in
-                                        Section(header: Text(group)) {
-                                            ForEach(maps.filter { $0.group == group }) { m in
-                                                Button {
-                                                    toggle(&filterMapIds, m.id)
-                                                } label: {
-                                                    Label(m.name,
-                                                          systemImage: filterMapIds.contains(m.id) ? "checkmark" : "")
-                                                }
-                                            }
-                                        }
-                                    }
-                                } label: {
-                                    filterMenuLabel(
-                                        selectedCount: filterMapIds.count,
-                                        noneText: "（指定なし）",
-                                        oneText: filterMapIds.count == 1
-                                            ? Catalog.mapName(byId: filterMapIds.first!, prefs: mapPrefs)
-                                            : nil)
-                                }
+                                mapFilterMenu
                             }
                             .padding(.horizontal)
 
@@ -180,36 +165,7 @@ struct BattleStatsView: View {
                             SectionLabel(text: "使用キャラ（複数選択可）")
                                 .padding(.horizontal).padding(.top, 2)
                             FormCard {
-                                let chars = Catalog.resolvedCharacters(prefs: charPrefs)
-                                Menu {
-                                    Button {
-                                        filterCharacterIds.removeAll()
-                                    } label: {
-                                        Label("すべて解除", systemImage: filterCharacterIds.isEmpty ? "checkmark" : "")
-                                    }
-                                    ForEach(CharacterRole.allCases) { role in
-                                        let inRole = chars.filter { $0.role == role }
-                                        if !inRole.isEmpty {
-                                            Section(header: Text(role.label)) {
-                                                ForEach(inRole) { c in
-                                                    Button {
-                                                        toggle(&filterCharacterIds, c.id)
-                                                    } label: {
-                                                        Label(c.name,
-                                                              systemImage: filterCharacterIds.contains(c.id) ? "checkmark" : "")
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                } label: {
-                                    filterMenuLabel(
-                                        selectedCount: filterCharacterIds.count,
-                                        noneText: "（指定なし）",
-                                        oneText: filterCharacterIds.count == 1
-                                            ? Catalog.charName(byId: filterCharacterIds.first!, prefs: charPrefs)
-                                            : nil)
-                                }
+                                characterFilterMenu
                             }
                             .padding(.horizontal)
 
@@ -309,6 +265,9 @@ struct BattleStatsView: View {
                                 sortBar
                                     .padding(.top, 4).padding(.horizontal)
 
+                                screenshotButton
+                                    .padding(.top, 4).padding(.horizontal)
+
                                 resultsTable
                                     .padding(.top, 4)
 
@@ -367,6 +326,25 @@ struct BattleStatsView: View {
             }
         }
         .navigationDestination(isPresented: $showShare) { ShareStatsView() }
+        .sheet(isPresented: $showSnapshotPreview) {
+            if let snapshotImage {
+                SnapshotPreviewSheet(
+                    image: snapshotImage,
+                    onSaveToPhotos: { saveSnapshotToPhotos(snapshotImage) },
+                    onShareToX: { prepareXShare(snapshotImage) },
+                    onDismiss: { showSnapshotPreview = false }
+                )
+                .alert(saveResultMessage ?? "", isPresented: $showSaveResult) {
+                    Button("OK") { }
+                }
+                .alert("Xに投稿", isPresented: $showXShareInfo) {
+                    Button("投稿画面を開く") { openXCompose() }
+                    Button("キャンセル", role: .cancel) { }
+                } message: {
+                    Text("画像をコピーしました。投稿画面が開いたら、本文欄に画像を貼り付けてください。")
+                }
+            }
+        }
         .onAppear {
             // 初回表示時は「今日」をデフォルトで自動検索
             if !didAutoLoad {
@@ -399,6 +377,97 @@ struct BattleStatsView: View {
         }
         .font(.caption)
         .foregroundColor(.secondary)
+    }
+
+    // MARK: - 対戦マップ絞り込みメニュー
+    //
+    // 以前はFormCardの中に直接Menu/ForEach/filterをネストして書いていたが、
+    // それだと`let`宣言・ForEach・三項演算子まで全部まとめて1つのViewBuilder式として
+    // 型推論されてしまい、コンパイラが時間内に解決できなくなっていた（型検査タイムアウト）。
+    // Menu本体・グループごとのSection・行のButtonをそれぞれ別の式（計算プロパティ／
+    // 関数）に分離し、型検査の単位を小さく保つ。
+
+    private var mapFilterMenu: some View {
+        let maps: [DisplayMap] = Catalog.resolvedMaps(prefs: mapPrefs)
+        let groups: [String] = Catalog.resolvedMapGroups(maps)
+        return Menu {
+            Button {
+                filterMapIds.removeAll()
+            } label: {
+                Label("すべて解除", systemImage: filterMapIds.isEmpty ? "checkmark" : "")
+            }
+            ForEach(groups, id: \.self) { group in
+                mapGroupSection(group: group, maps: maps)
+            }
+        } label: {
+            filterMenuLabel(
+                selectedCount: filterMapIds.count,
+                noneText: "（指定なし）",
+                oneText: filterMapIds.count == 1
+                    ? Catalog.mapName(byId: filterMapIds.first!, prefs: mapPrefs)
+                    : nil)
+        }
+    }
+
+    @ViewBuilder
+    private func mapGroupSection(group: String, maps: [DisplayMap]) -> some View {
+        let mapsInGroup: [DisplayMap] = maps.filter { $0.group == group }
+        Section(header: Text(group)) {
+            ForEach(mapsInGroup) { m in
+                mapToggleButton(m)
+            }
+        }
+    }
+
+    private func mapToggleButton(_ m: DisplayMap) -> some View {
+        Button {
+            toggle(&filterMapIds, m.id)
+        } label: {
+            Label(m.name, systemImage: filterMapIds.contains(m.id) ? "checkmark" : "")
+        }
+    }
+
+    // MARK: - 使用キャラ絞り込みメニュー（理由はmapFilterMenuと同じ）
+
+    private var characterFilterMenu: some View {
+        let chars: [DisplayCharacter] = Catalog.resolvedCharacters(prefs: charPrefs)
+        return Menu {
+            Button {
+                filterCharacterIds.removeAll()
+            } label: {
+                Label("すべて解除", systemImage: filterCharacterIds.isEmpty ? "checkmark" : "")
+            }
+            ForEach(CharacterRole.allCases) { role in
+                characterRoleSection(role: role, chars: chars)
+            }
+        } label: {
+            filterMenuLabel(
+                selectedCount: filterCharacterIds.count,
+                noneText: "（指定なし）",
+                oneText: filterCharacterIds.count == 1
+                    ? Catalog.charName(byId: filterCharacterIds.first!, prefs: charPrefs)
+                    : nil)
+        }
+    }
+
+    @ViewBuilder
+    private func characterRoleSection(role: CharacterRole, chars: [DisplayCharacter]) -> some View {
+        let inRole: [DisplayCharacter] = chars.filter { $0.role == role }
+        if !inRole.isEmpty {
+            Section(header: Text(role.label)) {
+                ForEach(inRole) { c in
+                    characterToggleButton(c)
+                }
+            }
+        }
+    }
+
+    private func characterToggleButton(_ c: DisplayCharacter) -> some View {
+        Button {
+            toggle(&filterCharacterIds, c.id)
+        } label: {
+            Label(c.name, systemImage: filterCharacterIds.contains(c.id) ? "checkmark" : "")
+        }
     }
 
     // MARK: - フィルタ補助
@@ -490,37 +559,43 @@ struct BattleStatsView: View {
             endTs = Int64(nextDay.timeIntervalSince1970)
         }
 
-        // 日付だけSQLで絞る（複数選択・ロールはメモリ側で。フィルタ後は少件数の前提）
+        // 日付だけSQLで絞る（複数選択・ロール・ランクはメモリ側で。フィルタ後は少件数の前提）
         let predicate: Predicate<BattleRecord> = #Predicate { r in
             r.dateTimestamp >= startTs && r.dateTimestamp < endTs
         }
         let descriptor = FetchDescriptor<BattleRecord>(predicate: predicate)
-        var matched = (try? context.fetch(descriptor)) ?? []
+        let fetched = (try? context.fetch(descriptor)) ?? []
 
-        if !filterMapIds.isEmpty {
-            matched = matched.filter { filterMapIds.contains($0.mapId) }
-        }
-        if !filterCharacterIds.isEmpty {
-            matched = matched.filter { filterCharacterIds.contains($0.characterId) }
-        }
-        if !filterRoles.isEmpty {
-            matched = matched.filter { r in
-                guard let role = MasterData.character(byId: r.characterId)?.role else { return false }
-                return filterRoles.contains(role)
+        // マップ／キャラ／ロール／ランクの4条件を、以前は`.filter`を4回チェーンして
+        // 順に絞り込んでいた（＝毎回全件をなめ直す）。条件を1つの`.filter`にまとめ、
+        // どの条件も未指定なら丸ごとスキップして無駄なコピーも作らないようにした。
+        let hasFilter = !filterMapIds.isEmpty || !filterCharacterIds.isEmpty
+                      || !filterRoles.isEmpty || !filterRanks.isEmpty
+        let matched: [BattleRecord] = hasFilter ? fetched.filter { r in
+            if !filterMapIds.isEmpty && !filterMapIds.contains(r.mapId) { return false }
+            if !filterCharacterIds.isEmpty && !filterCharacterIds.contains(r.characterId) { return false }
+            if !filterRoles.isEmpty {
+                guard let role = MasterData.character(byId: r.characterId)?.role,
+                      filterRoles.contains(role) else { return false }
             }
-        }
-        if !filterRanks.isEmpty {
-            matched = matched.filter { r in
-                guard let rank = r.rank else { return false }
-                return filterRanks.contains(rank)
+            if !filterRanks.isEmpty {
+                guard let rank = r.rank, filterRanks.contains(rank) else { return false }
             }
-        }
+            return true
+        } : fetched
 
         rebuildAggregation(from: matched)
 
-        // ロール別集計
+        // ロール別集計と全体の勝敗内訳を、matchedを1回なめるだけで同時に求める
+        // （以前はロール別集計ループ＋勝敗内訳の`.filter`×3で計4パスしていた）
         var roleAgg: [CharacterRole: (games: Int, wins: Int, losses: Int)] = [:]
+        var wins = 0, losses = 0, draws = 0
         for r in matched {
+            switch r.result {
+            case .win:  wins += 1
+            case .lose: losses += 1
+            case .draw: draws += 1
+            }
             guard let role = MasterData.character(byId: r.characterId)?.role else { continue }
             var e = roleAgg[role] ?? (games: 0, wins: 0, losses: 0)
             e.games += 1
@@ -537,9 +612,9 @@ struct BattleStatsView: View {
         }
 
         totalGames  = matched.count
-        totalWins   = matched.filter { $0.result == .win }.count
-        totalLosses = matched.filter { $0.result == .lose }.count
-        totalDraws  = matched.filter { $0.result == .draw }.count
+        totalWins   = wins
+        totalLosses = losses
+        totalDraws  = draws
         hasSearched = true
     }
 
@@ -749,6 +824,137 @@ struct BattleStatsView: View {
         .padding(6)
         .background(Color(uiColor: .secondarySystemBackground))
         .cornerRadius(10)
+    }
+
+    // MARK: - スクリーンショットボタン
+
+    private var screenshotButton: some View {
+        HStack {
+            Spacer()
+            Button {
+                captureSnapshot()
+            } label: {
+                Label("結果をスクリーンショット", systemImage: "camera")
+                    .font(.caption)
+                    .foregroundColor(.bongaPurple)
+            }
+        }
+    }
+
+    /// 検索条件パネルの「期間」を、画像に載せるための短い文言に変換する
+    private var periodRangeText: String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy/MM/dd"
+        f.locale = Locale(identifier: "ja_JP")
+        switch (startDate, endDate) {
+        case (nil, nil):
+            return "全期間"
+        case let (s?, e?):
+            return Calendar.current.isDate(s, inSameDayAs: e)
+                ? f.string(from: s)
+                : "\(f.string(from: s))〜\(f.string(from: e))"
+        case let (s?, nil):
+            return "\(f.string(from: s))〜"
+        case let (nil, e?):
+            return "〜\(f.string(from: e))"
+        }
+    }
+
+    /// 現在の検索結果（サマリー・ロール別・集計テーブル）をオフスクリーンで
+    /// 丸ごとレンダリングし、1枚の画像にする。
+    /// スクロール位置や画面の縦幅に関係なく、結果は常に全件そのまま画像化される。
+    ///
+    /// `UIScreen.main`はiOS 26で非推奨になった（複数画面環境を前提に、
+    /// 画面固有の情報は個々のUIScreenインスタンス経由で取得する方針に変更されたため）。
+    /// SwiftUIのView外からは`UIWindowScene`経由で取得する。
+    @MainActor
+    private func captureSnapshot() {
+        let screen = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first?.screen
+        let width = screen?.bounds.width ?? 393
+        let scale = screen?.scale ?? 3
+
+        let content = StatsSnapshotView(
+            periodText: periodRangeText,
+            totalGames: totalGames,
+            totalWins: totalWins,
+            totalLosses: totalLosses,
+            totalDraws: totalDraws,
+            roleStats: roleStats,
+            groupTitle: groupUnit.rawValue,
+            primaryColumnTitle: primaryColumnTitle,
+            showSecondary: groupUnit == .characterMap,
+            aggregated: aggregated
+        )
+        .frame(width: width)
+
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = scale
+        if let image = renderer.uiImage {
+            snapshotImage = image
+            showSnapshotPreview = true
+        }
+    }
+
+    /// 画像化した戦績表を写真アプリに保存する。
+    ///
+    /// `UIImageWriteToSavedPhotosAlbum`はSwiftのクロージャを直接使えず、
+    /// Objective-Cの`Selector`経由でしか結果を受け取れなかった（古いAPI）ため、
+    /// クロージャベースで結果ハンドリングできる`PHPhotoLibrary`（追加専用権限）を使う。
+    /// `NSPhotoLibraryAddUsageDescription`はInfo.plistに設定済み。
+    private func saveSnapshotToPhotos(_ image: UIImage) {
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            switch status {
+            case .authorized, .limited:
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetChangeRequest.creationRequestForAsset(from: image)
+                }) { success, _ in
+                    DispatchQueue.main.async {
+                        saveResultMessage = success ? "写真に保存しました" : "保存に失敗しました。もう一度お試しください。"
+                        showSaveResult = true
+                    }
+                }
+            default:
+                DispatchQueue.main.async {
+                    saveResultMessage = "写真への保存が許可されていません。設定アプリで「写真」へのアクセスを許可してください。"
+                    showSaveResult = true
+                }
+            }
+        }
+    }
+
+    /// 現在の検索結果から、Xの投稿文面を組み立てる
+    private var suggestedXPostText: String {
+        let winRate = totalGames > 0 ? Double(totalWins) / Double(totalGames) * 100 : 0
+        var text = "【\(periodRangeText)の戦績】\(totalWins)勝\(totalLosses)敗"
+        if totalGames > 0 {
+            text += "・勝率\(String(format: "%.0f", winRate))%"
+        }
+        text += "\n#ボンバーガール #BongaRecord"
+        return text
+    }
+
+    /// 画像をクリップボードにコピーし、Xの投稿画面を開く準備をする
+    /// （実際に開くのは、案内アラートで「投稿画面を開く」が押されてから）
+    private func prepareXShare(_ image: UIImage) {
+        UIPasteboard.general.image = image
+        let encoded = suggestedXPostText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        pendingXAppURL = URL(string: "twitter://post?message=\(encoded)")
+        pendingXWebURL = URL(string: "https://twitter.com/intent/tweet?text=\(encoded)")
+        showXShareInfo = true
+    }
+
+    /// Xアプリがあればアプリの投稿画面を、無ければブラウザのツイート作成画面を開く
+    private func openXCompose() {
+        guard let appURL = pendingXAppURL else { return }
+        UIApplication.shared.open(appURL, options: [:]) { opened in
+            if !opened, let webURL = pendingXWebURL {
+                DispatchQueue.main.async {
+                    UIApplication.shared.open(webURL)
+                }
+            }
+        }
     }
 
     // MARK: - 差分表示ヘルパー

@@ -33,6 +33,7 @@ struct PlayerInfoEditView: View {
     @State private var showSetupConfirm          = false
     @State private var showPromoteConfirm        = false
     @State private var rankInfoMessage: String?  = nil
+    @State private var isStampingRank            = false
 
     var body: some View {
         ZStack {
@@ -212,7 +213,7 @@ struct PlayerInfoEditView: View {
             Button("OK") { }
         }
         .alert("過去の記録に反映しますか？", isPresented: $showSetupConfirm) {
-            Button("反映する") { setupRank() }
+            Button("反映する") { Task { await setupRank() } }
             Button("キャンセル", role: .cancel) { }
         } message: {
             Text("これまでに記録した全試合を「\(selectedRank.label)」として記録します。以降の新しい記録には、その時点のランクが付きます。")
@@ -267,14 +268,23 @@ struct PlayerInfoEditView: View {
                     Button {
                         showSetupConfirm = true
                     } label: {
-                        Text("設定して過去の記録に反映")
-                            .font(.bongaEmphasis(.subheadline))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(Color.bongaPurple)
-                            .foregroundColor(.bongaOnAccent)
-                            .cornerRadius(6)
+                        if isStampingRank {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Color.bongaPurple)
+                                .cornerRadius(6)
+                        } else {
+                            Text("設定して過去の記録に反映")
+                                .font(.bongaEmphasis(.subheadline))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Color.bongaPurple)
+                                .foregroundColor(.bongaOnAccent)
+                                .cornerRadius(6)
+                        }
                     }
+                    .disabled(isStampingRank)
                 } else {
                     if let current = currentRankValue {
                         Text("現在：\(current.label)")
@@ -312,17 +322,22 @@ struct PlayerInfoEditView: View {
     }
 
     /// 初期設定：現在ランクを設定し、過去の全記録をそのランクで埋める
-    private func setupRank() {
+    private func setupRank() async {
         let pi = context.ensurePlayerInfo()
         pi.rankTrackingEnabled = true
         pi.setRank(to: selectedRank)
-
-        let all = (try? context.fetch(FetchDescriptor<BattleRecord>())) ?? []
-        for r in all { r.rankRaw = selectedRank.rawValue }
         try? context.save()
 
+        isStampingRank = true
+        defer { isStampingRank = false }
+
+        // 過去記録への一括スタンプは件数次第で重くなるため、MainActorから
+        // 切り離したactorに任せる（CSVインポートと同じ考え方）。
+        let stamper = RankStampActor(modelContainer: context.container)
+        let count = (try? await stamper.stampAll(rank: selectedRank.rawValue)) ?? 0
+
         rankConfigured = true
-        rankInfoMessage = "過去 \(all.count) 件を「\(selectedRank.label)」として記録しました。"
+        rankInfoMessage = "過去 \(count) 件を「\(selectedRank.label)」として記録しました。"
     }
 
     /// ランク変更（昇格・降格）：現在ランクのみ更新（過去記録はそのまま）

@@ -30,16 +30,25 @@ enum CSVManager {
 
     // MARK: - Export（自前バックアップ用。人間可読の名前ベース）
 
-    static func makeCSV(records: [BattleRecord], playerInfo: PlayerInfo?) -> String {
+    /// - Note: マップ名・キャラ名は`Catalog.mapName/charName(byId:prefs:)`で解決する。
+    ///   これにより、カスタム追加したマップ・キャラも名前付きで書き出せる
+    ///   （`BattleRecord.mapName`/`.characterName`はMasterDataしか見ないため、
+    ///   カスタム分だと「不明」になってしまう）。
+    static func makeCSV(records: [BattleRecord],
+                        playerInfo: PlayerInfo?,
+                        mapPrefs: [MapPreference] = [],
+                        charPrefs: [CharacterPreference] = []) -> String {
         var lines: [String] = []
         lines.reserveCapacity(records.count + 4)
         lines.append("# BongaRecord CSV v1")
         lines.append("date,map,character,result")
         for r in records {
             let dateStr = dateFormatter.string(from: r.date)
+            let mapName = Catalog.mapName(byId: r.mapId, prefs: mapPrefs) ?? "不明"
+            let charName = Catalog.charName(byId: r.characterId, prefs: charPrefs) ?? "不明"
             lines.append([dateStr,
-                          escape(r.mapName),
-                          escape(r.characterName),
+                          escape(mapName),
+                          escape(charName),
                           r.result.label].joined(separator: ","))
         }
         return lines.joined(separator: "\n")
@@ -47,9 +56,19 @@ enum CSVManager {
 
     // MARK: - Import
 
+    /// 取り込んだ1行分の下書き。`BattleRecord`（`@Model`でSendable非準拠）を
+    /// バックグラウンドactorへ直接渡すのは避け、この軽量な値型で受け渡す。
+    /// actor側（`CSVImportActor`）でこのDraftから`BattleRecord`を生成しinsertする。
+    struct ImportedBattleDraft: Sendable {
+        let date: Date
+        let mapId: Int
+        let characterId: Int
+        let result: BattleResult
+    }
+
     struct ImportResult {
-        /// 取り込めた戦績
-        var records: [BattleRecord]
+        /// 取り込めた戦績（まだ`ModelContext`にはinsertされていない下書き）
+        var records: [ImportedBattleDraft]
         /// 行はあったが、未知のNo・不正な値でスキップした件数
         var skipped: Int
     }
@@ -70,7 +89,7 @@ enum CSVManager {
                              .replacingOccurrences(of: "\r", with: "\n")
         let rawLines = normalized.split(separator: "\n", omittingEmptySubsequences: false)
 
-        var records: [BattleRecord] = []
+        var records: [ImportedBattleDraft] = []
         records.reserveCapacity(rawLines.count)
         var skipped = 0
 
@@ -111,10 +130,10 @@ enum CSVManager {
                 skipped += 1; continue
             }
 
-            records.append(BattleRecord(date: date,
-                                        mapId: map.id,
-                                        characterId: character.id,
-                                        result: result))
+            records.append(ImportedBattleDraft(date: date,
+                                                mapId: map.id,
+                                                characterId: character.id,
+                                                result: result))
         }
 
         return ImportResult(records: records, skipped: skipped)

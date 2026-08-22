@@ -37,6 +37,7 @@ struct ContentView: View {
     /// 型推論する式が2〜3段程度に収まり、迷う余地がなくなる。
     @State private var showRecord = false
     @State private var showStats = false
+    @State private var showBattleAI = false
     @State private var showProfile = false
     @State private var showMatsubi = false
     @State private var showStreamSettings = false
@@ -57,13 +58,18 @@ struct ContentView: View {
                             menuButton("戦績表示")                { showStats = true }
                                 .navigationDestination(isPresented: $showStats) { BattleStatsView() }
 
+                            menuButton("戦績AI",
+                                       badge: FeatureFlags.battleAIReleased ? nil : "BETA") { showBattleAI = true }
+                                .navigationDestination(isPresented: $showBattleAI) { BattleAIView() }
+
                             menuButton("プロフィール")            { showProfile = true }
                                 .navigationDestination(isPresented: $showProfile) { ProfileHubView() }
 
                             menuButton("末尾通知")              { showMatsubi = true }
                                 .navigationDestination(isPresented: $showMatsubi) { MatsubiNotificationView() }
 
-                            menuButton("配信連携（OBS）")        { showStreamSettings = true }
+                            menuButton("配信連携（OBS）",
+                                       badge: FeatureFlags.obsStreamingReleased ? nil : "BETA") { showStreamSettings = true }
                                 .navigationDestination(isPresented: $showStreamSettings) { StreamSettingsView() }
 
                             // 「マップ／キャラ管理」「引継ぎデータ作成／取込」「ライブアクティビティ」
@@ -122,16 +128,34 @@ struct ContentView: View {
         return nil
     }
 
-    private func menuButton(_ title: String, action: @escaping () -> Void) -> some View {
+    /// - Parameter badge: 右上に枠付きで小さく出すラベル（例: "BETA"）。nilなら何も出さない。
+    private func menuButton(_ title: String, badge: String? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title)
-                .font(.headline)
-                .foregroundColor(.bongaOnAccent)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 22)
-                .background(Color.bongaPurple)
-                .cornerRadius(6)
+            ZStack(alignment: .topTrailing) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundColor(.bongaOnAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 22)
+                    .background(Color.bongaPurple)
+                    .cornerRadius(6)
+
+                if let badge {
+                    Text(badge)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.bongaOnAccent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.bongaOnAccent, lineWidth: 1)
+                        )
+                        .padding(8)
+                        .accessibilityHidden(true)
+                }
+            }
         }
+        .accessibilityLabel(badge != nil ? "\(title)（ベータ機能）" : title)
     }
 }
 

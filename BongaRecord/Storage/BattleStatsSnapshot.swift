@@ -37,22 +37,41 @@ struct BattleStatsSnapshot {
     }
 
     /// `records`から`since`（UNIXタイムスタンプ秒）以降の分だけを集計する。
-    /// `records`は順不同で渡してよい（内部で新しい順に並べ替える）。
+    /// `records`は順不同で渡してよい。
+    ///
+    /// - Note: これは試合を1件登録・修正するたびに（配信連携／ライブアクティビティ／
+    ///   実績通知のON数だけ）毎回呼ばれる、アプリの中でも特に頻度が高い集計処理。
+    ///   以前は「filter→全件sort→filter×3→streak用ループ」で記録全体を5回
+    ///   なめていたが、勝敗数の集計は1パスにまとめ、連勝／連敗数を数えるための
+    ///   ソートも「実際に連勝／連敗中の場合だけ」に限定した。
     static func compute(from records: [BattleRecord], since: Int64) -> BattleStatsSnapshot {
-        let target = records
-            .filter { $0.dateTimestamp >= since }
-            .sorted { $0.dateTimestamp > $1.dateTimestamp }
+        var wins = 0, losses = 0, draws = 0
+        var latestTimestamp: Int64 = .min
+        var latestResult: BattleResult?
 
-        let wins   = target.filter { $0.result == .win }.count
-        let losses = target.filter { $0.result == .lose }.count
-        let draws  = target.filter { $0.result == .draw }.count
+        for r in records where r.dateTimestamp >= since {
+            switch r.result {
+            case .win:  wins += 1
+            case .lose: losses += 1
+            case .draw: draws += 1
+            }
+            if r.dateTimestamp > latestTimestamp {
+                latestTimestamp = r.dateTimestamp
+                latestResult = r.result
+            }
+        }
 
         var streakCount = 0
         var streakType: StreakType = .none
-        if let latest = target.first, latest.result != .draw {
-            streakType = (latest.result == .win) ? .win : .lose
-            for r in target {
-                if r.result.rawValue == latest.result.rawValue {
+        if let latestResult, latestResult != .draw {
+            streakType = (latestResult == .win) ? .win : .lose
+            // 連勝／連敗数を正確に数えるには新しい順の並びが要る。
+            // 引分け止まり（streakType == .none）ならこのソート自体が不要になる。
+            let sortedDesc = records
+                .filter { $0.dateTimestamp >= since }
+                .sorted { $0.dateTimestamp > $1.dateTimestamp }
+            for r in sortedDesc {
+                if r.result == latestResult {
                     streakCount += 1
                 } else {
                     break

@@ -407,19 +407,17 @@ struct CalendarStatsView: View {
         let monthRecords = (try? context.fetch(FetchDescriptor<BattleRecord>(predicate: predicate))) ?? []
 
         // 戦績ヒートマップ用はマップ／キャラ／ロールで絞る
-        var matched = monthRecords
-        if !mapIds.isEmpty {
-            matched = matched.filter { mapIds.contains($0.mapId) }
-        }
-        if !characterIds.isEmpty {
-            matched = matched.filter { characterIds.contains($0.characterId) }
-        }
-        if !roles.isEmpty {
-            matched = matched.filter { r in
-                guard let role = MasterData.character(byId: r.characterId)?.role else { return false }
-                return roles.contains(role)
+        // （以前は`.filter`を3回チェーンしていたのを1回に統合）
+        let hasFilter = !mapIds.isEmpty || !characterIds.isEmpty || !roles.isEmpty
+        let matched: [BattleRecord] = hasFilter ? monthRecords.filter { r in
+            if !mapIds.isEmpty && !mapIds.contains(r.mapId) { return false }
+            if !characterIds.isEmpty && !characterIds.contains(r.characterId) { return false }
+            if !roles.isEmpty {
+                guard let role = MasterData.character(byId: r.characterId)?.role,
+                      roles.contains(role) else { return false }
             }
-        }
+            return true
+        } : monthRecords
 
         var buckets: [Int: DayStat] = [:]
         for r in matched {

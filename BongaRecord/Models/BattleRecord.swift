@@ -3,7 +3,7 @@ import SwiftData
 
 // MARK: - Result Enum（Int rawValue：1バイト相当でストレージ節約）
 
-enum BattleResult: Int, Codable, CaseIterable, Identifiable, Hashable {
+enum BattleResult: Int, Codable, CaseIterable, Identifiable, Hashable, Sendable {
     case win  = 0
     case lose = 1
     case draw = 2

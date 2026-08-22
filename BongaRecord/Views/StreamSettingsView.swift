@@ -20,6 +20,24 @@ struct StreamSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
 
+                    // MARK: ベータ機能の注記
+                    if !FeatureFlags.obsStreamingReleased {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "wrench.and.screwdriver.fill")
+                                .foregroundColor(.bongaPurple)
+                            Text("この機能は開発中のベータ版です。今後の更新で仕様が変わる場合があります。")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.bongaPurple, lineWidth: 1)
+                        )
+                        .padding(.horizontal).padding(.top, 8)
+                    }
+
                     // MARK: 使い方（4ステップだけ）
                     SectionLabel(text: "使い方")
                         .padding(.horizontal).padding(.top, 8)

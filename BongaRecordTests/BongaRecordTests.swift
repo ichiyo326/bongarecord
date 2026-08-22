@@ -2,7 +2,7 @@
 //  BongaRecordTests.swift
 //  BongaRecordTests
 //
-//  Created by ICHI on 2026/08/15.
+//  Created by 樋口裕季 on 2026/08/15.
 //
 
 import Testing

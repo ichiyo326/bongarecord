@@ -1,19 +1,22 @@
+# macOS
 .DS_Store
-__MACOSX/
 
-# Xcode
-build/
-.build/
-DerivedData/
-*.xcuserstate
+# Xcode user data
 xcuserdata/
-*.xccheckout
-*.xcscmblueprint
+*.xcuserstate
+DerivedData/
+build/
+*.moved-aside
+*.xcworkspace/xcuserdata/
 
-# Swift Package Manager
+# SwiftPM
+.build/
 .swiftpm/
-SourcePackages/
 
-# Local tools and settings
+# Local AI/dev-tool settings
 .claude/
-node-installer.pkg
+
+# Secrets / local configuration
+.env
+.env.*
+*.xcconfig.local
